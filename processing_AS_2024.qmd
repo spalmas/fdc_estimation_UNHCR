@@ -1,0 +1,168 @@
+---
+title: "Estimation of Asylum seekers 2023"
+date: 2024/06/18
+format: docx
+editor: visual
+---
+
+# Methodology to estimate asylum-seeking children
+
+UNHCR has different coverages of age and sex country data regarding Asylum-seeking persons (pending cases). To correct for this we:
+
+1.  Extract the percentage of AS children for EU countries from Eurostat, starting in 2018.
+2.  Calculate the average percentage of AS children of nonEU countries using UNHCR API data, starting in 2018.
+3.  For non EU countries with more or equal than 50% coverage: keep reported proportion, starting in 2018
+4.  For non EU countries with less than 50% coverage use nonEU average calculated in step 2, starting in 2018
+5.  For EU countries, keep reported proportion.
+6.  Calculate estimated AS children population using these percentages, starting in 2018.
+
+Note: Previous version of this estimation found in *Key numbers 2023.qmd*
+
+# Profile
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+rm(list=ls())
+
+# PROFILE ----
+
+# set working directories and all directories 
+# this is the profile for the PROD-SDG_report_2023 project
+# this profile should be loaded before running any other script
+
+USERNAME    <- Sys.getenv("USERNAME")
+USERPROFILE <- Sys.getenv("USERPROFILE")
+USER        <- Sys.getenv("USER")
+
+#file paths for each user of the repository
+if (USERNAME == "palma"){
+  projectFolder  <- file.path(file.path(Sys.getenv("USERPROFILE"), "OneDrive - UNICEF/Migration and Displacement/Data/Asylum seekers estimate")) #Output files
+  repoFolder  <- file.path(file.path(Sys.getenv("USERPROFILE"), "code/DW-DemogMigration")) #repository files
+  rawdataFolder <- file.path(file.path(Sys.getenv("USERPROFILE"), "OneDrive - UNICEF/Migration and Displacement/Data/"))  #raw data folder
+} 
+
+# confirm that the main directory is correct
+# check if the folders exist
+stopifnot(dir.exists(projectFolder))
+stopifnot(dir.exists(repoFolder))
+
+# Packages ----
+library(dplyr) 
+library(countrycode)
+library(eurostat)
+library(stringr)
+library(tidyr) 
+
+# Load general data and helper functions ----
+country_regions <- read.csv( file.path(rawdataFolder, "UNICEF/country_regions_master.csv")) 
+```
+
+# Prepare data
+
+## Eurostat
+
+This code gets the percentage of AS cases that are children per EU country at the end of 2023. We use the Eurostat indicator *migr_asypenctzm: Persons subject of asylum applications pending at the end of the month by citizenship, age and sex - monthly data.* For the year, we use the data for december.
+
+```{r}
+## Code to download data from eurostat
+euro.AS.2018.2023 <- get_eurostat("migr_asypenctzm",
+                                          filters=list(time=c("2018-12","2019-12","2020-12","2021-12","2022-12","2023-12"),
+                                                       sex="T",
+                                                       age=c("TOTAL", "Y_LT18")),
+                                          time_format = "raw",
+                                          cache=F)
+
+write.csv(euro.AS.2018.2023,file = file.path(rawdataFolder, "Eurostat/migr_asypenctzm_20240619.csv"), row.names = FALSE)
+
+euro.AS.2018.2023 <- read.csv(file.path(rawdataFolder, "Eurostat/migr_asypenctzm_20240619.csv")) |> 
+  filter(!geo %in% c("EU27_2020", "UK")) |>  #UK does not report to eurostat anymore
+  filter(citizen == "TOTAL") |> 
+  rename('iso2' = geo)  |> 
+  group_by(iso2, time) |> 
+  summarise(AS=sum(values[age=="TOTAL"], na.rm=TRUE),
+            AS.0to17=sum(values[age=="Y_LT18"], na.rm=TRUE),
+            .groups="drop") |> 
+  mutate(AS.0to17.perc.estimated=AS.0to17/AS,
+         year=as.integer(str_sub(as.character(time), 1,4)),
+         iso3=countrycode(iso2, origin="eurostat", destination='iso3c')) |> 
+  select(iso3, year, AS.0to17.perc.estimated)
+```
+
+## UNHCR data
+
+For those years that the asylum-seeker age/sex coverage is lower than 0.5, we assume that a third of the Asylum-seekers are children
+
+For those years that the asylum-seeker age/sex coverage is greater or equal than 0.5, we extrapolate the known children proportion to the total population
+
+```{r}
+
+unhcr.demographics <- read.csv(file.path(rawdataFolder, "UNHCR/GlobalTrends2023/source_data/unhcr_query/demographics.csv"))
+
+asylum.seekers <- unhcr.demographics |> 
+  filter(Population.Type == 'ASY') |> 
+  group_by(Country.of.asylum..ISO.,Year) |> 
+  summarise(AS = sum(Total),
+            AS.with.known.sex = sum(Female.total , Male.total),
+            AS.with.known.sex.age = sum(Female.0...4 , Female.5...11 , Female.12...17 , Female.18...59 , Female.60 ,Male.0...4 , Male.5...11 , Male.12...17 , Male.18...59 , Male.60),
+            AS.0to17.known = sum(Female.0...4 , Female.5...11 , Female.12...17 , Male.0...4 , Male.5...11 , Male.12...17),
+            .groups = 'drop') |> 
+  mutate(coverage.sex = AS.with.known.sex/AS,
+         coverage.sex.age = AS.with.known.sex.age/AS,
+         AS.0to17.perc = AS.0to17.known/AS.with.known.sex.age) |> 
+  rename(iso3=Country.of.asylum..ISO., year=Year) 
+
+```
+
+### Global (non-EU) average of percentage of asylum seeking children, 2018-2023
+
+Only using countries with high coverage
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+noneuro.AS.2018.2023 <- asylum.seekers |> 
+  filter(year >= 2018) |> 
+  filter(!iso3 %in% euro.AS.2018.2023$iso3) |>  #no EU countries. EU countries data from Eurostat
+  filter(coverage.sex.age>=.5) |>   #only countries with decent data coverage
+  filter(!is.na(AS.0to17.perc))
+
+noneuro.AS.2018.2023.avg <- noneuro.AS.2018.2023 |> 
+  group_by(year)|> 
+  summarise(AS.0to17.perc.estimated=sum(AS.0to17.known)/sum(AS.with.known.sex.age))
+
+print(noneuro.AS.2018.2023.avg)
+```
+
+# Assign estimated percentage and estimated total number of AS
+
+```{r}
+AS.estimate <- asylum.seekers |> 
+  mutate(AS.0to17.perc.estimated = ifelse(coverage.sex.age<0.5, NA, AS.0to17.perc))
+
+#Use world averages for those countires with age coverage <.5 
+AS.estimate$AS.0to17.perc.estimated[AS.estimate$coverage.sex.age <.5 & AS.estimate$year==2018] <- noneuro.AS.2018.2023.avg$AS.0to17.perc.estimated[1]
+AS.estimate$AS.0to17.perc.estimated[AS.estimate$coverage.sex.age <.5 & AS.estimate$year==2019] <- noneuro.AS.2018.2023.avg$AS.0to17.perc.estimated[2]
+AS.estimate$AS.0to17.perc.estimated[AS.estimate$coverage.sex.age <.5 & AS.estimate$year==2020] <- noneuro.AS.2018.2023.avg$AS.0to17.perc.estimated[3]
+AS.estimate$AS.0to17.perc.estimated[AS.estimate$coverage.sex.age <.5 & AS.estimate$year==2021] <- noneuro.AS.2018.2023.avg$AS.0to17.perc.estimated[4]
+AS.estimate$AS.0to17.perc.estimated[AS.estimate$coverage.sex.age <.5 & AS.estimate$year==2022] <- noneuro.AS.2018.2023.avg$AS.0to17.perc.estimated[5]
+AS.estimate$AS.0to17.perc.estimated[AS.estimate$coverage.sex.age <.5 & AS.estimate$year==2023] <- noneuro.AS.2018.2023.avg$AS.0to17.perc.estimated[6]
+
+#EU countries, use Eurostat data
+AS.estimate <- AS.estimate |> 
+  rows_update(euro.AS.2018.2023, by = c("iso3", "year"))  #for EU countries use eurostat values
+
+#CALCULATING ESTIMATED CHILDREN POPULATION
+AS.estimate <- AS.estimate |> 
+  mutate(AS.0to17.estimated = AS*AS.0to17.perc.estimated)
+```
+
+# Exporting data
+
+```{r}
+save(AS.estimate,
+     file = file.path(rawdataFolder,'/Asylum seekers estimate/AS_estimate_2023.RData'))
+```
